@@ -1,93 +1,110 @@
 import os
 import numpy as np
 import soundfile as sf
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc
 import matplotlib.pyplot as plt
 
-from scipy.signal import resample, welch
-from scipy.fftpack import dct
+def extract_features(file_path, target_length=50000):
+   	try:
+      	data, sr = sf.read(file_path)
 
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, confusion_matrix
+       	if len(data.shape) > 1:
+       		data = np.mean(data, axis=1)
 
-REAL_DIR = "data/real"
-ASV_AUDIO_DIR = "data/ASVspoof2019_LA_train/flac"
+       	data = data / (np.max(np.abs(data)) + 1e-6)
 
-SAMPLE_RATE = 16000
-DURATION = 3
+       	if len(data) > target_length:
+       		data = data[:target_length]
+       	else:
+           		data = np.pad(data, (0, target_length - len(data)))
 
-def preprocess_audio(path, sr=SAMPLE_RATE, max_len=DURATION):
-    audio, file_sr = sf.read(path)
+       	fft = np.fft.fft(data)
+       	fft_magnitude = np.abs(fft)[:len(fft)//2]
 
-    if audio.ndim > 1:
-        audio = np.mean(audio, axis=1)
+       	feature = np.mean(fft_magnitude.reshape(-1, 500), axis=1)
 
-    if file_sr != sr:
-        audio = resample(audio, int(len(audio) * sr / file_sr))
+       	return feature
 
-    max_samples = sr * max_len
-    if len(audio) > max_samples:
-        audio = audio[:max_samples]
-    else:
-        audio = np.pad(audio, (0, max_samples - len(audio)))
+   	except Exception as e:
+       	print(f"Error processing {file_path}: {e}")
+       	return None
 
-    return audio
+def load_data(directory, label, max_files=None):
+   		features = []
+   		labels = []
 
-def extract_features(audio, sr=SAMPLE_RATE):
-    freqs, psd = welch(audio, sr, nperseg=512)
-    log_psd = np.log(psd + 1e-10)
-    mfcc_like = dct(log_psd, type=2, norm="ortho")[:13]
+   		count = 0
 
-    zero_crossings = np.mean(np.abs(np.diff(np.sign(audio)))) / 2
+   		for root, _, files in os.walk(directory):
+       		for file in files:
+           			if file.endswith(".wav") or file.endswith(".flac"):
+               			path = os.path.join(root, file)
 
-    energy = np.mean(audio ** 2)
+               			feature = extract_features(path)
 
-    return np.hstack([mfcc_like, zero_crossings, energy])
+               		if feature is not None:
+                   		features.append(feature)
+                   		labels.append(label)
+                   		count += 1
 
-X = []
-y = []
+               		if max_files and count >= max_files:
+                   		return features, labels
 
-print("Loading real audio...")
-for file in os.listdir(REAL_DIR):
-    if file.endswith(".flac"):
-        audio = preprocess_audio(os.path.join(REAL_DIR, file))
-        X.append(extract_features(audio))
-        y.append(0)
+   		return features, labels
 
-print("Loading fake audio...")
-for file in os.listdir(ASV_AUDIO_DIR):
-    if file.endswith(".flac"):
-        path = os.path.join(ASV_AUDIO_DIR, file)
-        audio = preprocess_audio(path)
-        features = extract_features(audio)
-        X.append(features)
-        y.append(1)
+#Data 1 real1fake1
+real_path = "data/real"
+fake_path = "data/ASVspoof2019_LA_train/flac"
 
-X = np.array(X)
-y = np.array(y)
+#Data 2 real2fake2
+'''real_path = "data/NaturalSpeech3"
+fake_path = "data/real_samples"'''
 
-print("\nTotal samples:", len(y))
-print("Real:", np.sum(y == 0))
-print("Fake:", np.sum(y == 1))
+#Data 3 real2fake1
+'''real_path = "data/real"
+fake_path = "data/real_samples"'''
+
+#Data 4 real1fake2
+'''real_path = "data/NaturalSpeech3"
+fake_path = "data/ASVspoof2019_LA_train/flac"'''
+
+print("Loading real samples...")
+real_features, real_labels = load_data(real_path, 0, max_files=250)
+	
+print("Loading fake samples...")
+fake_features, fake_labels = load_data(fake_path, 1, max_files=250)
+
+X = np.array(real_features + fake_features)
+y = np.array(real_labels + fake_labels)
+
+print("Total samples:", len(X))
 
 X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42, stratify=y
+   	X, y, test_size=0.2, random_state=42, stratify=y
 )
 
-model = LogisticRegression(max_iter=1000)
+model = RandomForestClassifier(n_estimators=100, random_state=42)
 model.fit(X_train, y_train)
 
 y_pred = model.predict(X_test)
+y_prob = model.predict_proba(X_test)[:, 1]
+fpr, tpr, threshold = roc_curve(y_test, y_prob)
+roc_auc = auc(fpr, tpr)
 
-print("\nAccuracy:", accuracy_score(y_test, y_pred))
+plt.plot(fpr, tpr)
+plt.plot([0,1], [0,1], linestyle = '--')
+plt.xlabel = ("False Positive Rate")
+plt.ylabel = ("True Positive Rate")
+plt.title(f"ROC Curve (AUC = {roc_auc: .2f})")
+plt.show()
+
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred))
+
 print("Confusion Matrix:")
 print(confusion_matrix(y_test, y_pred))
 
-importance = model.coef_[0]
-
-plt.figure()
-plt.bar(range(len(importance)), importance)
-plt.xlabel("Feature Index")
-plt.ylabel("Weight")
-plt.title("Feature Importance for Deepfake Detection")
-plt.show()
+accuracy = model.score(X_test, y_test)
+print(f"\nAccuracy: {accuracy * 100:.2f}%")
