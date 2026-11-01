@@ -1,0 +1,4 @@
+numpy
+soundfile
+scikit-learn
+matplotlib
